@@ -9,8 +9,8 @@ app = Flask(__name__)
 
 app.config.from_object(Config)
 db = SQLAlchemy(app)
-migrate = Migrate(app, db, compare_type=True)
+migrate = Migrate(app, db)
 login_manager = LoginManager(app)
+csrf = CSRFProtect(app)
 
 from app import routes, models
-
