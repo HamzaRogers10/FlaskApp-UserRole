@@ -1,8 +1,10 @@
+import re
 from flask_wtf.csrf import generate_csrf
 from flask_login import login_user, current_user, logout_user
 from app import app, db
-from app.models import User, Role
-from .forms import LoginForm, RegistrationForm
+from app.models import User, Role, Post
+from . import paginate_results
+from .forms import LoginForm, RegistrationForm, PostForm
 from flask import jsonify, request
 
 
@@ -31,6 +33,10 @@ def create_user():
 
     if not email or not password or not role_id:
         return jsonify({'error': 'Missing required parameter.'}), 400
+
+    # Validate email format
+    if not re.match(r"[^@]+@[^@]+\.[^@]+", email):
+        return jsonify({'error': 'Invalid email format.'}), 400
 
     existing_user = User.query.filter_by(email=email).first()
     if existing_user:
@@ -68,3 +74,39 @@ def create_role():
     db.session.add(role)
     db.session.commit()
     return jsonify({'message': 'Role created successfully'}), 201
+
+
+# Post creation route
+@app.route('/posts', methods=['POST'])
+def create_post():
+    data = request.get_json()
+    title = data.get('title')
+    description = data.get('description')
+    author_id = data.get('author_id')
+
+    if not title or not description or not author_id:
+        return jsonify({'error': 'Missing required parameter.'}), 400
+
+    post = Post(title=title, description=description, author_id=author_id)
+    db.session.add(post)
+    db.session.commit()
+
+    return jsonify({'success': 'Post created successfully.'}), 201
+
+
+@app.route('/posts/author/<int:author_id>', methods=['GET'])
+def get_posts_by_author(author_id):
+    page = request.args.get('page', default=1, type=int)
+    per_page = request.args.get('per_page', default=10, type=int)
+    posts = Post.query.filter_by(author_id=author_id).paginate(page=page, per_page=per_page, error_out=False)
+    post_list = []
+    for post in posts.items:
+        post_list.append({
+            'id': post.id,
+            'title': post.title,
+            'description': post.description,
+            'author_id': post.author_id,
+            'created_at': post.created_at,
+            'updated_at': post.updated_at
+        })
+    return jsonify(paginate_results(posts, post_list)), 200

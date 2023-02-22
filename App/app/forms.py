@@ -1,5 +1,5 @@
 from flask_wtf import FlaskForm
-from wtforms import StringField, PasswordField, BooleanField, SubmitField
+from wtforms import StringField, PasswordField, BooleanField, SubmitField, TextAreaField
 from wtforms.validators import InputRequired, Email, EqualTo, ValidationError
 from flask_login import UserMixin
 from .models import User
@@ -24,5 +24,8 @@ class RegistrationForm(FlaskForm):
     password2 = PasswordField('Repeat Password', validators=[InputRequired(), EqualTo('password')])
     submit = SubmitField('Register')
 
-    # flask-wtf takes validate_<field_name> as custom validators
-    # so the below validator gets invoked on username
+
+class PostForm(FlaskForm):
+    title = StringField('Title', validators=[InputRequired()])
+    description = TextAreaField('Description', validators=[InputRequired()])
+    submit = SubmitField('Post')
