@@ -1,12 +1,28 @@
-import re
+from functools import wraps
+from flask import make_response
 import jsonschema
+from email_validator import validate_email, EmailNotValidError
 from flask import jsonify, request
-from flask_wtf.csrf import generate_csrf
-from flask_login import login_user, current_user, logout_user
-from app import app, db
-from app.models import User, Role, Post
-from . import paginate_results
-from .forms import LoginForm, RegistrationForm, PostForm
+from flask_jwt_extended import create_access_token
+from flask_jwt_extended import jwt_required, get_jwt_identity
+from flask_login import login_user, current_user, logout_user, login_required
+from werkzeug.exceptions import BadRequest, Unauthorized
+
+from . import app, db, login_manager
+from .models import User, Role, Post, PostSharedUsers
+
+
+@app.route('/protected')
+@jwt_required
+def protected():
+    current_user_id = get_jwt_identity()
+    return jsonify(logged_in_as=current_user_id), 200
+
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
 
 # Define request schemas
 LOGIN_SCHEMA = {
@@ -39,56 +55,81 @@ USER_SCHEMA = {
 }
 
 
-@app.route('/login', methods=['POST'])
-def login():
-    form = LoginForm()
+def validate_request(schema):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            data = request.get_json()
+            try:
+                jsonschema.validate(data, schema)
+            except jsonschema.exceptions.ValidationError as e:
+                raise BadRequest(description=str(e))
 
-    if form.validate_on_submit():
-        user = User.query.filter_by(email=form.email.data).first()
-        if user and user.check_password(form.password.data):
-            login_user(user, remember=form.remember_me.data)
-            return {"message": "Login successful"}, 200
-        else:
-            return {"message": "Invalid username or password"}, 401
-    else:
-        errors = form.errors
-        return {"errors": errors}, 422
+            try:
+                # Validate email format using email-validator library
+                valid = validate_email(data['email'])
+                data['email'] = valid.email
+            except EmailNotValidError as e:
+                raise BadRequest(description=str(e))
+
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
 
 
 @app.route('/register/<int:role_id>', methods=['POST'])
+@validate_request(REGISTRATION_SCHEMA)
 def create_user(role_id):
-    # Get the request data in JSON format
     data = request.get_json()
 
-    # Validate the request data against the JSON schema
-    try:
-        jsonschema.validate(data, REGISTRATION_SCHEMA)
-    except jsonschema.exceptions.ValidationError as e:
-        return jsonify({'error': str(e)}), 400
-
-    # Check if a user with the same email already exists in the database
     existing_user = User.query.filter_by(email=data['email']).first()
     if existing_user:
-        return jsonify({'error': 'A user with that email already exists.'}), 409
+        raise BadRequest(description='A user with that email already exists.')
 
-    # Create a new User object with the email and role_id parameters
     user = User(email=data['email'], role_id=role_id)
-
-    # Set the user's password and hash it before storing it in the database
     user.set_password(data['password'])
 
-    # Add the user object to the database session and commit it to the database
     db.session.add(user)
     db.session.commit()
 
-    # Return the new user's data, including their ID
-    return jsonify({'id': user.id, 'email': user.email, 'role_id': user.role_id}), 201
+    access_token = create_access_token(identity=user.id)
+
+    # Include user data in response
+    response = {
+        'access_token': access_token,
+        'user': {
+            'id': user.id,
+            'email': user.email,
+            'role_id': user.role_id
+        }
+    }
+
+    return jsonify(response), 201
 
 
+@app.route('/login', methods=['POST'])
+@validate_request(LOGIN_SCHEMA)
+def login():
+    data = request.get_json()
+    email = data['email']
+    password = data['password']
+    user = User.query.filter_by(email=email).first()
+    if not user or not user.check_password(password):
+        raise Unauthorized(description='Invalid email or password.')
+    login_user(user)
+    access_token = create_access_token(identity=user.id)
+    response = make_response(jsonify({'message': 'Login successful.'}))
+    response.headers['Authorization'] = f'Bearer {access_token}'
+    return response, 200
+
+
+# All users route
 @app.route('/users', methods=['GET'])
 def get_all_users():
     page = request.args.get('page', default=1, type=int)
-    per_page = request.args.get('per_page', default=10, type=int)
+    per_page = request.args.get('per_page', default=30, type=int)
     users = User.query.paginate(page=page, per_page=per_page, error_out=False)
     user_list = []
     for user in users.items:
@@ -100,12 +141,7 @@ def get_all_users():
     return jsonify(user_list)
 
 
-@app.route('/csrf_token')
-def get_csrf_token():
-    token = generate_csrf()
-    return {"csrf_token": token}, 200
-
-
+# Logout route
 @app.route('/logout')
 def logout():
     if current_user.is_authenticated:
@@ -115,6 +151,7 @@ def logout():
         return {"message": "Not logged in"}, 401
 
 
+# Create role route
 @app.route('/roles', methods=['POST'])
 def create_role():
     name = request.json.get('name')
@@ -126,29 +163,36 @@ def create_role():
     return jsonify({'id': role.id, 'name': role.name}), 201
 
 
-
+# Create post route
 @app.route('/posts/<int:author_id>', methods=['POST'])
 def create_post(author_id):
-    # Get the request data in JSON format
     data = request.get_json()
 
-    # Extract the required parameters from the request data
     title = data.get('title')
     description = data.get('description')
 
-    # Check if any of the required parameters are missing
     if not title or not description:
         return jsonify({'error': 'Missing required parameter.'}), 400
 
-    # Create a new Post object with the title, description, and author_id parameters
     post = Post(author_id=author_id, title=title, description=description)
 
-    # Add the post object to the database session and commit it to the database
     db.session.add(post)
     db.session.commit()
 
     # Return a success message and the new post's data, including its ID
-    return jsonify({'author_id': post.author_id, 'title': post.title, 'description': post.description}), 201
+
+    return jsonify(
+        {'id': post.id, 'author_id': post.author_id, 'title': post.title, 'description': post.description}), 201
+
+
+def paginate_results(posts, post_list):
+    return {
+        'page': posts.page,
+        'per_page': posts.per_page,
+        'total': posts.total,
+        'pages': posts.pages,
+        'items': post_list
+    }
 
 
 @app.route('/posts/author/<int:author_id>', methods=['GET'])
@@ -158,7 +202,7 @@ def get_posts_by_author(author_id):
         return jsonify({'error': 'User is not registered with this id'}), 404
 
     page = request.args.get('page', default=1, type=int)
-    per_page = request.args.get('per_page', default=10, type=int)
+    per_page = request.args.get('per_page', default=30, type=int)
     posts = Post.query.filter_by(author_id=author_id).paginate(page=page, per_page=per_page, error_out=False)
 
     if not posts.total:
@@ -182,7 +226,7 @@ def get_posts_by_author(author_id):
 @app.route('/posts', methods=['GET'])
 def get_all_posts():
     page = request.args.get('page', default=1, type=int)
-    per_page = request.args.get('per_page', default=10, type=int)
+    per_page = request.args.get('per_page', default=20, type=int)
     posts = Post.query.paginate(page=page, per_page=per_page, error_out=False)
     post_list = []
     for post in posts.items:
@@ -195,3 +239,48 @@ def get_all_posts():
             'updated_at': post.updated_at
         })
     return jsonify(paginate_results(posts, post_list)), 200
+
+
+@app.route('/share_post/<int:post_id>/<int:user_id>', methods=['POST'])
+@login_required
+def share_post(post_id, user_id):
+    if request.method != 'POST':
+        return jsonify({'error': 'Method not allowed'}), 405
+
+    post = Post.query.filter_by(id=post_id, author_id=user_id).first()
+
+    if not post:
+        return jsonify({'error': 'Invalid post ID or user ID'}), 400
+
+    if current_user.id == user_id:
+        return jsonify({'error': 'You cannot share your own post'}), 403
+
+    # Create a new PostSharedUsers object and set its attributes
+    shared_post = PostSharedUsers(
+        post_id=post.id,
+        user_id=current_user.id,
+        title=post.title,
+        description=post.description,
+        updated_at=post.updated_at,
+        created_at=post.created_at
+    )
+
+    # Add the new PostSharedUsers object to the database session and commit the changes
+    db.session.add(shared_post)
+    db.session.commit()
+
+    return jsonify({'message': f'Post shared with user ID {user_id}.'})
+
+
+@app.route('/shared_posts/<int:user_id>', methods=['GET'])
+@login_required
+def shared_posts(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'Invalid user ID'}), 400
+
+    shared_posts = user.shared_posts.all()
+    if not shared_posts:
+        return jsonify({'message': 'This user has not shared any posts.'}), 404
+
+    return jsonify({'posts': [post.to_dict() for post in shared_posts]}), 200
