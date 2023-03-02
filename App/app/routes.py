@@ -7,7 +7,7 @@ from flask_jwt_extended import create_access_token
 from flask_jwt_extended import jwt_required, get_jwt_identity
 from flask_login import login_user, current_user, logout_user, login_required
 from werkzeug.exceptions import BadRequest, Unauthorized
-
+from werkzeug.exceptions import NotFound
 from . import app, db, login_manager
 from .models import User, Role, Post, PostSharedUsers
 
@@ -284,3 +284,35 @@ def shared_posts(user_id):
         return jsonify({'message': 'This user has not shared any posts.'}), 404
 
     return jsonify({'posts': [post.to_dict() for post in shared_posts]}), 200
+
+
+# Partial update user route
+@app.route('/update/<int:user_id>', methods=['PATCH'])
+@login_required
+@validate_request(USER_SCHEMA)
+def update_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        raise NotFound(description=f'User with ID {user_id} not found.')
+    data = request.get_json()
+    for field, value in data.items():
+        setattr(user, field, value)
+    db.session.commit()
+    response = {
+        'id': user.id,
+        'email': user.email,
+        'role_id': user.role_id
+    }
+    return jsonify(response), 200
+
+
+# Delete user route
+@app.route('/delete/<int:user_id>', methods=['DELETE'])
+@login_required
+def delete_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        raise NotFound(description=f'User with ID {user_id} not found.')
+    db.session.delete(user)
+    db.session.commit()
+    return jsonify({'message': f'User with ID {user_id} deleted.'}), 200

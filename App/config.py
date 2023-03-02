@@ -1,6 +1,7 @@
 import os
-from dotenv import load_dotenv
 from pathlib import Path
+
+from dotenv import load_dotenv
 
 # handy to have - makes referencing files on local system easier
 basedir = Path(__file__).parent
